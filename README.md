@@ -210,9 +210,9 @@ The accelerator uses **symmetric INT8 quantization**:
 
 ## 📚 Documentation
 
-- [`ARCHITECTURE.md`](accel%20v1/docs/ARCHITECTURE.md) - Detailed system architecture
-- [`QUANTIZATION.md`](accel%20v1/docs/QUANTIZATION.md) - INT8 quantization methodology  
-- [`VERIFICATION.md`](accel%20v1/docs/VERIFICATION.md) - Testing and validation approach
+- [`HOST_RS_TILER.md`](docs/HOST_RS_TILER.md) - Complete Host RS Tiler implementation guide
+- [`PROJECT_COMPLETION_SUMMARY.md`](docs/PROJECT_COMPLETION_SUMMARY.md) - Project status summary
+- Hardware docs in `accel v1/docs/` - Basic documentation stubs (minimal coverage)
 
 ## 🤝 Contributing
 
