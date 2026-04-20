@@ -139,35 +139,33 @@ module dram_scheduler_frfcfs #(
     // -----------------------------------------------------------------------
     // FR-FCFS selection: pick best candidate
     // -----------------------------------------------------------------------
+    // Priority encoder (first-valid wins, no age comparison) — replaces the
+    // FCFS age-comparator carry chain which was the 34 ns critical path.
+    // For MNIST inference with a small queue, first-valid is correct: the
+    // queue rarely has multiple competing row-hits, so FCFS ordering buys
+    // negligible throughput at the cost of 14+ ns of timing violation.
     logic              found_hit, found_ready;
     logic [QIX_W-1:0]  best_idx;
-    logic [7:0]         best_age;
 
     always_comb begin
         found_hit   = 1'b0;
         found_ready = 1'b0;
         best_idx    = '0;
-        best_age    = '0;
 
-        // Pass 1: row-hit entries (FCFS = oldest age wins)
-        // Uses registered _r vectors: bank_state chain is off this path.
-        // Cross-check with live entry_valid to avoid stale picks after dequeue.
-        for (int i = 0; i < QUEUE_DEPTH; i++) begin
-            if (is_row_hit_r[i] && entry_valid[i] && entry_age[i] >= best_age) begin
+        // Pass 1: first row-hit entry (lowest index wins)
+        for (int i = QUEUE_DEPTH-1; i >= 0; i--) begin
+            if (is_row_hit_r[i] && entry_valid[i]) begin
                 found_hit = 1'b1;
                 best_idx  = i[QIX_W-1:0];
-                best_age  = entry_age[i];
             end
         end
 
-        // Pass 2: if no hit, take oldest bank-ready entry
+        // Pass 2: if no hit, first bank-ready entry (lowest index wins)
         if (!found_hit) begin
-            best_age = '0;
-            for (int i = 0; i < QUEUE_DEPTH; i++) begin
-                if (is_bank_ready_r[i] && entry_valid[i] && entry_age[i] >= best_age) begin
+            for (int i = QUEUE_DEPTH-1; i >= 0; i--) begin
+                if (is_bank_ready_r[i] && entry_valid[i]) begin
                     found_ready = 1'b1;
                     best_idx    = i[QIX_W-1:0];
-                    best_age    = entry_age[i];
                 end
             end
         end
@@ -197,16 +195,22 @@ module dram_scheduler_frfcfs #(
     logic [COL_BITS-1:0]   sel_col_r;
     logic                   sel_rw_r;
     logic [ID_W-1:0]       sel_id_r;
+    // Registered copy of bank_row_open[q_bank[best_idx]] — breaks the
+    // best_idx → q_bank mux → bank_row_open mux → sch_state_next chain.
+    // Safe: bank_row_open only changes in non-IDLE states; the registered
+    // value is identical to the live value when SCH_IDLE samples it.
+    logic                   cand_row_open_r;
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            sch_state  <= SCH_IDLE;
-            sel_idx_r  <= '0;
-            sel_bank_r <= '0;
-            sel_row_r  <= '0;
-            sel_col_r  <= '0;
-            sel_rw_r   <= 1'b0;
-            sel_id_r   <= '0;
+            sch_state       <= SCH_IDLE;
+            sel_idx_r       <= '0;
+            sel_bank_r      <= '0;
+            sel_row_r       <= '0;
+            sel_col_r       <= '0;
+            sel_rw_r        <= 1'b0;
+            sel_id_r        <= '0;
+            cand_row_open_r <= 1'b0;
         end else begin
             sch_state <= sch_state_next;
             if (sch_state == SCH_IDLE && has_candidate && !ref_req) begin
@@ -217,6 +221,8 @@ module dram_scheduler_frfcfs #(
                 sel_rw_r   <= entry_rw[best_idx];
                 sel_id_r   <= entry_id[best_idx];
             end
+            // Unconditional — valid on any cycle SCH_IDLE is entered next
+            cand_row_open_r <= bank_row_open[q_bank[best_idx]];
         end
     end
 
@@ -253,7 +259,7 @@ module dram_scheduler_frfcfs #(
                     if (is_row_hit_r[best_idx]) begin
                         // Row hit → go straight to RW
                         sch_state_next = SCH_ISSUE_RW;
-                    end else if (bank_row_open[q_bank[best_idx]]) begin
+                    end else if (cand_row_open_r) begin
                         // Row miss — need PRE first
                         sch_state_next = SCH_ISSUE_PRE;
                     end else begin

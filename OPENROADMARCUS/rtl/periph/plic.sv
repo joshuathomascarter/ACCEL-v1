@@ -115,27 +115,49 @@ module plic #(
   assign has_interrupt = |eligible;
 
   // Step 3: highest-priority interrupt for claim/complete (AXI read path only).
-  // This is still a sequential scan (~38 ns) but it is NOT on the irq_o timing arc;
-  // it drives AXI rdata which is behind a registered address (ar_addr_r) and
-  // downstream registered read data in the AXI master.
-  logic [NUM_SOURCES-1:0] highest_priority_interrupt;
-  logic [2:0]             highest_priority;
+  // Registered 1 cycle to break timing violations.
+  //
+  // Priority bucketing: group eligible sources by priority level (8 levels,
+  // 3-bit priority). This eliminates the loop-carried dependency of the
+  // sequential "priorities[i] > highest_priority" scan chain.
+  // Structure:
+  //   Stage A (parallel): eligible_by_prio[p][i] = eligible[i] & (priorities[i]==p)
+  //   Stage B (fast):     best_prio = priority encoder over 8 OR-reductions
+  //   Stage C (fast mux): result = eligible_by_prio[best_prio]
+  // Depth: ~5 levels (AND tree + OR tree + 8-to-1 mux). Far below 20 ns budget.
+  logic [NUM_SOURCES-1:0] eligible_by_prio [8];
   always_comb begin
-    highest_priority           = 3'b0;
-    highest_priority_interrupt = '0;
-    for (int i = NUM_SOURCES-1; i >= 0; i--) begin
-      if (eligible[i] && priorities[i] > highest_priority) begin
-        highest_priority           = priorities[i];
-        highest_priority_interrupt = (32'b1 << i);
+    for (int p = 0; p < 8; p++)
+      for (int i = 0; i < NUM_SOURCES; i++)
+        eligible_by_prio[p][i] = eligible[i] & (priorities[i] == p[2:0]);
+  end
+
+  logic [2:0] best_prio;
+  logic       any_eligible_prio;
+  always_comb begin
+    best_prio         = 3'b0;
+    any_eligible_prio = 1'b0;
+    for (int p = 0; p < 8; p++) begin
+      if (|eligible_by_prio[p]) begin
+        best_prio         = p[2:0];
+        any_eligible_prio = 1'b1;
       end
     end
   end
 
-  // Register irq_o — latency = 1 cycle, architecturally acceptable.
-  // The registered irq_o also breaks the cross-module combinational path.
+  logic [NUM_SOURCES-1:0] highest_priority_interrupt_comb;
+  logic [NUM_SOURCES-1:0] highest_priority_interrupt_r;
+  assign highest_priority_interrupt_comb =
+      any_eligible_prio ? eligible_by_prio[best_prio] : '0;
+
   always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n) irq_o <= '0;
-    else        irq_o[0] <= has_interrupt;
+    if (!rst_n) begin
+      irq_o                        <= '0;
+      highest_priority_interrupt_r <= '0;
+    end else begin
+      irq_o[0]                     <= has_interrupt;
+      highest_priority_interrupt_r <= highest_priority_interrupt_comb;
+    end
   end
 
   // ===== AXI WRITE PATH =====
@@ -251,11 +273,11 @@ module plic #(
       // Priority threshold
       32'h0020_0000: rdata = {29'b0, threshold[0]};
       
-      // Claim/Complete - read returns highest pending
+      // Claim/Complete - read returns highest pending (registered to break comb chain)
       32'h0020_0004: begin
         rdata = '0;
         for (int i = NUM_SOURCES-1; i >= 0; i--) begin
-          if (highest_priority_interrupt[i]) begin
+          if (highest_priority_interrupt_r[i]) begin
             rdata = i;
             claim_set[i] = 1'b1;
           end
