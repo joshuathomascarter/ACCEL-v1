@@ -99,29 +99,54 @@ module plic #(
 
   // ===== INTERRUPT ROUTING =====
   
-  // Find highest priority pending interrupt above threshold
+  // Find pending interrupts above threshold. Keep irq generation shallow and
+  // registered so the PLIC-to-CPU interrupt path is not a 32-source scan chain.
   logic [NUM_SOURCES-1:0] eligible;
-  logic [NUM_SOURCES-1:0] highest_priority_interrupt;
-  logic [2:0] highest_priority;
-  logic has_interrupt;
-
   always_comb begin
-    highest_priority = 3'b0;
-    highest_priority_interrupt = '0;
-    has_interrupt = 1'b0;
-    
-    for (int i = NUM_SOURCES-1; i >= 0; i--) begin
-      if (pending[i] && priorities[i] > threshold[0]) begin
-        if (priorities[i] > highest_priority) begin
-          highest_priority = priorities[i];
-          highest_priority_interrupt = (1 << i);
-          has_interrupt = 1'b1;
-        end
+    for (int i = 0; i < NUM_SOURCES; i++)
+      eligible[i] = pending[i] && (priorities[i] > threshold[0]);
+  end
+
+  logic has_interrupt;
+  assign has_interrupt = |eligible;
+
+  // Priority bucketing: group eligible sources by priority level.
+  // Eliminates loop-carried dependency of sequential priority scan chain.
+  logic [NUM_SOURCES-1:0] eligible_by_prio [8];
+  always_comb begin
+    for (int p = 0; p < 8; p++)
+      for (int i = 0; i < NUM_SOURCES; i++)
+        eligible_by_prio[p][i] = eligible[i] & (priorities[i] == p[2:0]);
+  end
+
+  logic [2:0] best_prio;
+  logic       any_eligible_prio;
+  always_comb begin
+    best_prio         = 3'b0;
+    any_eligible_prio = 1'b0;
+    for (int p = 0; p < 8; p++) begin
+      if (|eligible_by_prio[p]) begin
+        best_prio         = p[2:0];
+        any_eligible_prio = 1'b1;
       end
     end
   end
 
-  assign irq_o[0] = has_interrupt;
+  logic [NUM_SOURCES-1:0] highest_priority_interrupt_comb;
+  logic [NUM_SOURCES-1:0] highest_priority_interrupt_r;
+  assign highest_priority_interrupt_comb =
+      any_eligible_prio ? eligible_by_prio[best_prio] : '0;
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      irq_o                        <= '0;
+      highest_priority_interrupt_r <= '0;
+    end else begin
+      irq_o    <= '0;
+      irq_o[0] <= has_interrupt;
+      highest_priority_interrupt_r <= highest_priority_interrupt_comb;
+    end
+  end
 
   // ===== AXI WRITE PATH =====
   
@@ -236,11 +261,11 @@ module plic #(
       // Priority threshold
       32'h0020_0000: rdata = {29'b0, threshold[0]};
       
-      // Claim/Complete - read returns highest pending
+      // Claim/Complete - read returns highest pending (registered to break comb chain)
       32'h0020_0004: begin
         rdata = '0;
         for (int i = NUM_SOURCES-1; i >= 0; i--) begin
-          if (highest_priority_interrupt[i]) begin
+          if (highest_priority_interrupt_r[i]) begin
             rdata = i;
             claim_set[i] = 1'b1;
           end
