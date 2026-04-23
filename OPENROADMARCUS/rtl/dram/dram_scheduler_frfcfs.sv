@@ -139,11 +139,9 @@ module dram_scheduler_frfcfs #(
     // -----------------------------------------------------------------------
     // FR-FCFS selection: pick best candidate
     // -----------------------------------------------------------------------
-    // Priority encoder (first-valid wins, no age comparison) — replaces the
-    // FCFS age-comparator carry chain which was the 34 ns critical path.
-    // For MNIST inference with a small queue, first-valid is correct: the
-    // queue rarely has multiple competing row-hits, so FCFS ordering buys
-    // negligible throughput at the cost of 14+ ns of timing violation.
+    // First-valid priority encoder (forward iteration) — picks FIRST match = oldest.
+    // Fixes deadlock from backward iteration that starved low indices.
+    // No age comparison: O(1) FIFO fairness, O(log N) hardware.
     logic              found_hit, found_ready;
     logic [QIX_W-1:0]  best_idx;
 
@@ -152,18 +150,19 @@ module dram_scheduler_frfcfs #(
         found_ready = 1'b0;
         best_idx    = '0;
 
-        // Pass 1: first row-hit entry (lowest index wins)
-        for (int i = QUEUE_DEPTH-1; i >= 0; i--) begin
-            if (is_row_hit_r[i] && entry_valid[i]) begin
+        // Pass 1: first row-hit entry (oldest enqueued wins)
+        // Iterate forward: first match is the oldest (lowest index in queue order)
+        for (int i = 0; i < QUEUE_DEPTH; i++) begin
+            if (is_row_hit_r[i] && entry_valid[i] && !found_hit) begin
                 found_hit = 1'b1;
                 best_idx  = i[QIX_W-1:0];
             end
         end
 
-        // Pass 2: if no hit, first bank-ready entry (lowest index wins)
+        // Pass 2: if no hit, first bank-ready entry (oldest enqueued wins)
         if (!found_hit) begin
-            for (int i = QUEUE_DEPTH-1; i >= 0; i--) begin
-                if (is_bank_ready_r[i] && entry_valid[i]) begin
+            for (int i = 0; i < QUEUE_DEPTH; i++) begin
+                if (is_bank_ready_r[i] && entry_valid[i] && !found_ready) begin
                     found_ready = 1'b1;
                     best_idx    = i[QIX_W-1:0];
                 end
